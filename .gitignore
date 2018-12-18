@@ -16,3 +16,5 @@
 # IDEA GoLand
 *.iml
 .idea
+
+vendor/
