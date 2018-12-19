@@ -10,6 +10,7 @@ import (
 // HandlerConfig stores the configuration of a GraphQL WebSocket handler.
 type HandlerConfig struct {
 	SubscriptionManager SubscriptionManager
+	NewConnection       func(ws *websocket.Conn, config ConnectionConfig) Connection
 	Authenticate        AuthenticateFunc
 }
 
@@ -17,6 +18,11 @@ type HandlerConfig struct {
 // This handler takes a SubscriptionManager and adds/removes subscriptions
 // as they are started/stopped by the client.
 func NewHandler(config HandlerConfig) http.Handler {
+	if config.NewConnection == nil {
+		// This was added to maintain the retro compatibility.
+		config.NewConnection = NewConnection
+	}
+
 	// Create a WebSocket upgrader that requires clients to implement
 	// the "graphql-ws" protocol
 	var upgrader = websocket.Upgrader{
@@ -49,7 +55,7 @@ func NewHandler(config HandlerConfig) http.Handler {
 			}
 
 			// Establish a GraphQL WebSocket connection
-			conn := NewConnection(ws, ConnectionConfig{
+			conn := config.NewConnection(ws, ConnectionConfig{
 				Authenticate: config.Authenticate,
 				EventHandlers: ConnectionEventHandlers{
 					Close: func(conn Connection) {
