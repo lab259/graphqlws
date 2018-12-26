@@ -17,7 +17,23 @@ func (topic StringTopic) ID() interface{} {
 	return topic
 }
 
-// Subscriber is reponsible for subscribing a Field to a topic.
+type MultipleTopic []interface{}
+
+func (topic MultipleTopic) ID() interface{} {
+	return topic
+}
+
+// SubscriptionSubscriber does subscriptions in behalf a single Subscription
 type Subscriber interface {
+	// Subscription the subscription this subscriber is representing.
+	Subscription() SubscriptionInterface
+
+	// Topics returns the array of topics subscribed.
+	// It is designed for accumulating subscriptions before applying it to a
+	// connection.
+	Topics() []Topic
+
+	// Subscribe does a subcription, or accumulate it (depends on the
+	// implementation).
 	Subscribe(topic Topic) error
 }

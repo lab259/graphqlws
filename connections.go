@@ -106,6 +106,9 @@ type Connection interface {
 	// ID returns the unique ID of the connection.
 	ID() string
 
+	// Conn is the direct websocket connection with the client.
+	Conn() *websocket.Conn
+
 	// User returns the user associated with the connection (or nil).
 	User() interface{}
 
@@ -115,6 +118,15 @@ type Connection interface {
 
 	// SendError sends an error to the client.
 	SendError(error)
+}
+
+// ConnectionFactory is an interface that creates concrete connections. It is
+// used by the handler and enables it to create different "instances" of
+// connections, depending on the need of the developer.
+//
+// An use case for this is to add new PubSub system (e.g. Redis PubSub, ...).
+type ConnectionFactory interface {
+	Create(*websocket.Conn, ConnectionEventHandlers) Connection
 }
 
 /**
@@ -158,6 +170,75 @@ func NewConnection(ws *websocket.Conn, config ConnectionConfig) Connection {
 	conn.logger.Info("Created connection")
 
 	return conn
+}
+
+type connectionFactory struct {
+	config              ConnectionConfig
+	subscriptionManager SubscriptionManager
+	logger              log.Logger
+}
+
+func NewConnectionFactory(connConfig ConnectionConfig, sManager SubscriptionManager, logger log.Logger) ConnectionFactory {
+	return &connectionFactory{
+		subscriptionManager: sManager,
+		logger:              logger,
+		config:              connConfig,
+	}
+}
+
+func (factory *connectionFactory) Create(ws *websocket.Conn, handlers ConnectionEventHandlers) Connection {
+	return NewConnection(ws, ConnectionConfig{
+		Authenticate: factory.config.Authenticate,
+		EventHandlers: ConnectionEventHandlers{
+			Close: func(conn Connection) {
+				factory.logger.WithFields(log.Fields{
+					"conn": conn.ID(),
+					"user": conn.User(),
+				}).Debug("Closing connection")
+
+				if handlers.Close != nil {
+					handlers.Close(conn)
+				}
+
+				if factory.config.EventHandlers.Close != nil {
+					factory.config.EventHandlers.Close(conn)
+				}
+			},
+			StartOperation: func(
+				conn Connection,
+				opID string,
+				data *StartMessagePayload,
+			) []error {
+				factory.logger.WithFields(log.Fields{
+					"conn": conn.ID(),
+					"op":   opID,
+					"user": conn.User(),
+				}).Debug("Start operation")
+
+				var errs []error
+
+				if handlers.StartOperation != nil {
+					errs = handlers.StartOperation(conn, opID, data)
+				}
+				if factory.config.EventHandlers.StartOperation != nil {
+					factory.config.EventHandlers.StartOperation(conn, opID, data)
+				}
+				return errs
+			},
+			StopOperation: func(conn Connection, opID string) {
+				if handlers.StopOperation != nil {
+					handlers.StopOperation(conn, opID)
+				}
+				if factory.config.EventHandlers.StopOperation != nil {
+					factory.config.EventHandlers.StopOperation(conn, opID)
+				}
+			},
+		},
+	})
+}
+
+func (conn *connection) Conn() *websocket.Conn {
+	return conn.ws
 }
 
 func (conn *connection) ID() string {

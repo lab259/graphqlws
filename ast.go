@@ -1,7 +1,7 @@
 package graphqlws
 
 import (
-	"github.com/graphql-go/graphql/language/ast"
+	"github.com/lab259/graphql/language/ast"
 )
 
 func operationDefinitionsWithOperation(
@@ -33,20 +33,24 @@ func selectionSetsForOperationDefinitions(
 	return sets
 }
 
-func nameForSelectionSet(set *ast.SelectionSet) (string, bool) {
+func nameForSelectionSet(set *ast.SelectionSet) ([]string, bool) {
 	if len(set.Selections) >= 1 {
-		if field, ok := set.Selections[0].(*ast.Field); ok {
-			return field.Name.Value, true
+		r := make([]string, len(set.Selections))
+		for i, selection := range set.Selections {
+			if field, ok := selection.(*ast.Field); ok {
+				r[i] = field.Name.Value
+			}
 		}
+		return r, true
 	}
-	return "", false
+	return nil, false
 }
 
 func namesForSelectionSets(sets []*ast.SelectionSet) []string {
-	names := []string{}
+	names := make([]string, 0)
 	for _, set := range sets {
-		if name, ok := nameForSelectionSet(set); ok {
-			names = append(names, name)
+		if nameList, ok := nameForSelectionSet(set); ok {
+			names = append(names, nameList...)
 		}
 	}
 	return names

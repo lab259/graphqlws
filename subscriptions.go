@@ -1,13 +1,16 @@
 package graphqlws
 
 import (
+	"context"
 	"errors"
-
-	"github.com/graphql-go/graphql"
-	"github.com/graphql-go/graphql/gqlerrors"
-	"github.com/graphql-go/graphql/language/ast"
-	"github.com/graphql-go/graphql/language/parser"
+	"fmt"
+	"github.com/lab259/graphql"
+	"github.com/lab259/graphql/gqlerrors"
+	"github.com/lab259/graphql/language/ast"
+	"github.com/lab259/graphql/language/parser"
 	log "github.com/sirupsen/logrus"
+	"strings"
+	"sync"
 )
 
 // ErrorsFromGraphQLErrors convert from GraphQL errors to regular errors.
@@ -27,6 +30,19 @@ func ErrorsFromGraphQLErrors(errors []gqlerrors.FormattedError) []error {
 // for a specific subscription to the corresponding subscriber.
 type SubscriptionSendDataFunc func(*DataMessagePayload)
 
+type SubscriptionInterface interface {
+	GetID() string
+	GetQuery() string
+	GetVariables() map[string]interface{}
+	GetOperationName() string
+	GetDocument() *ast.Document
+	GetFields() []string
+	GetConnection() Connection
+	GetSendData() SubscriptionSendDataFunc
+	SetFields(document []string)
+	SetDocument(document *ast.Document)
+}
+
 // Subscription holds all information about a GraphQL subscription
 // made by a client, including a function to send data back to the
 // client when there are updates to the subscription query result.
@@ -39,6 +55,46 @@ type Subscription struct {
 	Fields        []string
 	Connection    Connection
 	SendData      SubscriptionSendDataFunc
+}
+
+func (s *Subscription) GetID() string {
+	return s.ID
+}
+
+func (s *Subscription) GetQuery() string {
+	return s.Query
+}
+
+func (s *Subscription) GetVariables() map[string]interface{} {
+	return s.Variables
+}
+
+func (s *Subscription) GetOperationName() string {
+	return s.OperationName
+}
+
+func (s *Subscription) SetDocument(value *ast.Document) {
+	s.Document = value
+}
+
+func (s *Subscription) GetDocument() *ast.Document {
+	return s.Document
+}
+
+func (s *Subscription) SetFields(value []string) {
+	s.Fields = value
+}
+
+func (s *Subscription) GetFields() []string {
+	return s.Fields
+}
+
+func (s *Subscription) GetConnection() Connection {
+	return s.Connection
+}
+
+func (s *Subscription) GetSendData() SubscriptionSendDataFunc {
+	return s.SendData
 }
 
 // MatchesField returns true if the subscription is for data that
@@ -60,37 +116,41 @@ func (s *Subscription) MatchesField(field string) bool {
 
 // ConnectionSubscriptions defines a map of all subscriptions of
 // a connection by their IDs.
-type ConnectionSubscriptions map[string]*Subscription
+type ConnectionSubscriptions map[string]SubscriptionInterface
 
 // Subscriptions defines a map of connections to a map of
 // subscription IDs to subscriptions.
 type Subscriptions map[Connection]ConnectionSubscriptions
 
 // SubscriptionManager provides a high-level interface to managing
-// and accessing the subscriptions made by GraphQL WS clients.
+// and accessing the subscriptions
+// made by GraphQL WS clients.
 type SubscriptionManager interface {
-	// Subscriptions returns all registered subscriptions, grouped
-	// by connection.
-	Subscriptions() Subscriptions
-
 	// AddSubscription adds a new subscription to the manager.
-	AddSubscription(Connection, *Subscription) []error
+	AddSubscription(Connection, SubscriptionInterface) []error
 
 	// RemoveSubscription removes a subscription from the manager.
-	RemoveSubscription(Connection, *Subscription)
+	RemoveSubscription(Connection, string)
 
 	// RemoveSubscriptions removes all subscriptions of a client connection.
 	RemoveSubscriptions(Connection)
+
+	CreateSubscriptionSubscriber(subscription SubscriptionInterface) Subscriber
+
+	Publish(topic Topic, ctx context.Context) error
+
+	Subscribe(Subscriber) error
 }
 
 /**
  * The default implementation of the SubscriptionManager interface.
  */
 
-type subscriptionManager struct {
-	subscriptions Subscriptions
-	schema        *graphql.Schema
-	logger        *log.Entry
+type inMemorySubscriptionManager struct {
+	schema  *graphql.Schema
+	logger  *log.Entry
+	topicsM sync.Mutex
+	topics  map[Topic]map[string]SubscriptionInterface
 }
 
 func NewSubscriptionManagerWithLogger(schema *graphql.Schema, logger *log.Entry) SubscriptionManager {
@@ -98,29 +158,76 @@ func NewSubscriptionManagerWithLogger(schema *graphql.Schema, logger *log.Entry)
 }
 
 // NewSubscriptionManager creates a new subscription manager.
-func NewSubscriptionManager(schema *graphql.Schema) SubscriptionManager {
+func NewInMemorySubscriptionManager(schema *graphql.Schema) SubscriptionManager {
 	return newSubscriptionManager(schema, NewLogger("subscriptions"))
 }
 
 func newSubscriptionManager(schema *graphql.Schema, logger *log.Entry) SubscriptionManager {
-	manager := new(subscriptionManager)
-	manager.subscriptions = make(Subscriptions)
+	manager := new(inMemorySubscriptionManager)
+	manager.topics = make(map[Topic]map[string]SubscriptionInterface)
 	manager.logger = logger
 	manager.schema = schema
 	return manager
 }
 
-func (m *subscriptionManager) Subscriptions() Subscriptions {
-	return m.subscriptions
+func (m *inMemorySubscriptionManager) Publish(topic Topic, ctx context.Context) error {
+	subs, ok := m.topics[topic]
+	if !ok {
+		return nil
+	}
+	for _, sub := range subs {
+		log.WithFields(log.Fields{
+			"topic":          topic,
+			"connID":         sub.GetConnection().ID(),
+			"subscriptionID": sub.GetID(),
+		}).Infoln("publishing")
+		r := graphql.Execute(graphql.ExecuteParams{
+			OperationName: sub.GetOperationName(),
+			AST:           sub.GetDocument(),
+			Schema:        *m.schema,
+			Context:       ctx,
+			Args:          sub.GetVariables(),
+			Root:          nil,
+		})
+		sub.GetSendData()(&DataMessagePayload{
+			Errors: ErrorsFromGraphQLErrors(r.Errors),
+			Data:   r.Data,
+		})
+	}
+	return nil
 }
 
-func (m *subscriptionManager) AddSubscription(
+func (m *inMemorySubscriptionManager) Subscribe(sbsr Subscriber) error {
+	m.topicsM.Lock()
+	defer m.topicsM.Unlock()
+
+	subscription := sbsr.Subscription()
+	for _, topic := range sbsr.Topics() {
+		subs, ok := m.topics[topic]
+		if !ok {
+			subs = make(map[string]SubscriptionInterface)
+			m.topics[topic] = subs
+		}
+		_, ok = subs[subscription.GetID()]
+		if !ok {
+			subs[subscription.GetID()] = subscription
+			log.WithFields(log.Fields{
+				"connID":         subscription.GetConnection().ID(),
+				"subscriptionID": subscription.GetID(),
+				"topic":          topic,
+			}).Infoln("subscribed")
+		}
+	}
+	return nil
+}
+
+func (m *inMemorySubscriptionManager) AddSubscription(
 	conn Connection,
-	subscription *Subscription,
+	subscription SubscriptionInterface,
 ) []error {
 	m.logger.WithFields(log.Fields{
 		"conn":         conn.ID(),
-		"subscription": subscription.ID,
+		"subscription": subscription.GetID(),
 	}).Info("Add subscription")
 
 	if errors := validateSubscription(subscription); len(errors) > 0 {
@@ -130,7 +237,7 @@ func (m *subscriptionManager) AddSubscription(
 
 	// Parse the subscription query
 	document, err := parser.Parse(parser.ParseParams{
-		Source: subscription.Query,
+		Source: subscription.GetQuery(),
 	})
 	if err != nil {
 		m.logger.WithField("err", err).Warn("Failed to parse subscription query")
@@ -147,82 +254,106 @@ func (m *subscriptionManager) AddSubscription(
 	}
 
 	// Remember the query document for later
-	subscription.Document = document
+	subscription.SetDocument(document)
 
 	// Extract query names from the document (typically, there should only be one)
-	subscription.Fields = subscriptionFieldNamesFromDocument(document)
+	subscription.SetFields(subscriptionFieldNamesFromDocument(document))
 
-	// Allocate the connection's map of subscription IDs to
-	// subscriptions on demand
-	if m.subscriptions[conn] == nil {
-		m.subscriptions[conn] = make(ConnectionSubscriptions)
+	subscriber := NewInMemorySubscriber(subscription)
+
+	result := make([]error, 0)
+
+	var fields graphql.Fields
+	switch fs := m.schema.SubscriptionType().TypedConfig().Fields.(type) {
+	case graphql.Fields:
+		fields = fs
+	case graphql.FieldsThunk:
+		fields = fs()
+	default:
+		result = append(result, errors.New("fields type not supported"))
+		return result
 	}
 
-	// Add the subscription if it hasn't already been added
-	if m.subscriptions[conn][subscription.ID] != nil {
-		m.logger.WithFields(log.Fields{
-			"conn":         conn.ID(),
-			"subscription": subscription.ID,
-		}).Warn("Cannot register subscription twice")
-		return []error{errors.New("Cannot register subscription twice")}
+	log.WithFields(log.Fields{
+		"connID":         subscription.GetConnection().ID(),
+		"subscriptionID": subscription.GetID(),
+		"fields":         strings.Join(subscription.GetFields(), ", "),
+	}).Infoln("subscribing")
+
+	for _, fieldName := range subscription.GetFields() {
+		field, ok := fields[fieldName]
+		if !ok {
+			panic(fmt.Sprintf("subscription %s not found", fieldName))
+		}
+		subscriptionField, ok := field.(*SubscriptionField)
+		if !ok {
+			panic(fmt.Sprintf("subscription %s is not a SubscriptionField", fieldName))
+		}
+		err = subscriptionField.Subscribe(subscriber)
+		if err != nil {
+			result = append(result, err)
+			continue
+		}
+	}
+	err = m.Subscribe(subscriber)
+	if err != nil {
+		result = append(result, err)
 	}
 
-	m.subscriptions[conn][subscription.ID] = subscription
-
+	if len(result) > 0 {
+		return result
+	}
 	return nil
 }
 
-func (m *subscriptionManager) RemoveSubscription(
+func (m *inMemorySubscriptionManager) RemoveSubscription(
 	conn Connection,
-	subscription *Subscription,
+	subscriptionID string,
 ) {
 	m.logger.WithFields(log.Fields{
-		"conn":         conn.ID(),
-		"subscription": subscription.ID,
+		"conn":           conn.ID(),
+		"subscriptionID": subscriptionID,
 	}).Info("Remove subscription")
 
-	// Remove the subscription from its connections' subscription map
-	delete(m.subscriptions[conn], subscription.ID)
-
-	// Remove the connection as well if there are no subscriptions left
-	if len(m.subscriptions[conn]) == 0 {
-		delete(m.subscriptions, conn)
+	for _, subs := range m.topics {
+		delete(subs, subscriptionID)
 	}
 }
 
-func (m *subscriptionManager) RemoveSubscriptions(conn Connection) {
+func (m *inMemorySubscriptionManager) RemoveSubscriptions(conn Connection) {
 	m.logger.WithFields(log.Fields{
 		"conn": conn.ID(),
 	}).Info("Remove subscriptions")
 
-	// Only remove subscriptions if we know the connection
-	if m.subscriptions[conn] != nil {
-		// Remove subscriptions one by one
-		for opID := range m.subscriptions[conn] {
-			m.RemoveSubscription(conn, m.subscriptions[conn][opID])
+	for _, subs := range m.topics {
+		for key, subscription := range subs {
+			if subscription.GetConnection() == conn {
+				delete(subs, key)
+			}
 		}
-
-		// Remove the connection's subscription map altogether
-		delete(m.subscriptions, conn)
 	}
 }
 
-func validateSubscription(s *Subscription) []error {
+func (m *inMemorySubscriptionManager) CreateSubscriptionSubscriber(subscription SubscriptionInterface) Subscriber {
+	return NewInMemorySubscriber(subscription)
+}
+
+func validateSubscription(s SubscriptionInterface) []error {
 	errs := []error{}
 
-	if s.ID == "" {
+	if s.GetID() == "" {
 		errs = append(errs, errors.New("Subscription ID is empty"))
 	}
 
-	if s.Connection == nil {
+	if s.GetConnection() == nil {
 		errs = append(errs, errors.New("Subscription is not associated with a connection"))
 	}
 
-	if s.Query == "" {
+	if s.GetQuery() == "" {
 		errs = append(errs, errors.New("Subscription query is empty"))
 	}
 
-	if s.SendData == nil {
+	if s.GetSendData() == nil {
 		errs = append(errs, errors.New("Subscription has no SendData function set"))
 	}
 

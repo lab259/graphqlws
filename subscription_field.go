@@ -1,6 +1,6 @@
 package graphqlws
 
-import "github.com/graphql-go/graphql"
+import "github.com/lab259/graphql"
 
 type SubscriptionField struct {
 	graphql.Field

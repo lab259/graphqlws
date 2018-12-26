@@ -2,7 +2,6 @@ package graphqlws_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/functionalfoundry/graphqlws"
 	"github.com/gorilla/websocket"
-	"github.com/graphql-go/graphql"
+	"github.com/lab259/graphql"
+	"github.com/lab259/graphqlws"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -31,14 +30,13 @@ func TestSubscriptions(t *testing.T) {
 		t.FailNow()
 	}
 
-	subscriptionManager := graphqlws.NewSubscriptionManager(schema)
+	subscriptionManager := graphqlws.NewInMemorySubscriptionManager(schema)
 
 	srv := startServer(subscriptionManager)
 	defer srv.Close()
 
-	port := ":" + strings.Split(srv.URL,":")[2]
+	port := ":" + strings.Split(srv.URL, ":")[2]
 	log.Infof("Starting server on port: %s", port)
-
 
 	graphqlWsHeader := http.Header{}
 	graphqlWsHeader["Sec-WebSocket-Protocol"] = []string{"graphql-ws"}
@@ -66,7 +64,6 @@ func TestSubscriptions(t *testing.T) {
 	  }
 	}`, subscriptionName)
 
-
 	log.Infof("Subscribing for %s events", subscriptionName)
 	err = webSocketClient.WriteMessage(websocket.TextMessage, []byte(queryMessage))
 	if err != nil {
@@ -80,18 +77,18 @@ func TestSubscriptions(t *testing.T) {
 	go listenForMessages(webSocketClient, messageChannel, numberOfMessages)
 	time.Sleep(500 * time.Millisecond)
 
-	payload := map[string]interface{} {
-		"payload" : testedValue,
+	payload := map[string]interface{}{
+		"payload": testedValue,
 	}
 
-	for i:= 0; i<numberOfMessages; i++ {
+	for i := 0; i < numberOfMessages; i++ {
 		triggerSubscription(payload, schema, subscriptionManager)
 	}
 
 	expectedMessage := fmt.Sprintf("{\"id\":\"1\",\"type\":\"data\",\"payload\":{\"data\":{\"%s\":{\"payload\":\"%s\"}},\"errors\":null}}", subscriptionName, testedValue)
 
-	for i:=0; i<numberOfMessages; i++ {
-		receivedMessage := <- messageChannel
+	for i := 0; i < numberOfMessages; i++ {
+		receivedMessage := <-messageChannel
 		receivedMessage = strings.Replace(receivedMessage, "\n", "", -1)
 		if receivedMessage != expectedMessage {
 			t.Errorf("unexpected value received: '%s', expected: '%s'", receivedMessage, expectedMessage)
@@ -117,6 +114,10 @@ func listenForMessages(webSocketClient *websocket.Conn, messageChannel chan stri
 }
 
 func triggerSubscription(payload map[string]interface{}, schema *graphql.Schema, manager graphqlws.SubscriptionManager) error {
+	/*
+	TODO
+	 */
+	 /*
 	allSubscriptions := manager.Subscriptions()
 
 	sameQuerySubscriptionsMap := make(map[string][]*graphqlws.Subscription)
@@ -156,6 +157,7 @@ func triggerSubscription(payload map[string]interface{}, schema *graphql.Schema,
 			subscription.SendData(subscriptionData)
 		}
 	}
+	 */
 	return nil
 }
 
