@@ -1,6 +1,9 @@
 package graphqlws
 
 import (
+	"github.com/lab259/graphql"
+	"github.com/lab259/graphql/language/parser"
+	log "github.com/sirupsen/logrus"
 	"net/http"
 
 	"github.com/gorilla/websocket"
@@ -8,6 +11,7 @@ import (
 
 // HandlerConfig stores the configuration of a GraphQL WebSocket handler.
 type HandlerConfig struct {
+	Schema              *graphql.Schema
 	SubscriptionManager SubscriptionManager
 	ConnectionFactory   ConnectionFactory
 	Authenticate        AuthenticateFunc
@@ -50,7 +54,7 @@ func NewHandler(config HandlerConfig) http.Handler {
 
 			conn := config.ConnectionFactory.Create(ws, ConnectionEventHandlers{
 				StartOperation: func(conn Connection, operationID string, payload *StartMessagePayload) []error {
-					return config.SubscriptionManager.AddSubscription(conn, &Subscription{
+					subscription := &Subscription{
 						ID:            operationID,
 						Query:         payload.Query,
 						Variables:     payload.Variables,
@@ -59,7 +63,43 @@ func NewHandler(config HandlerConfig) http.Handler {
 						SendData: func(data *DataMessagePayload) {
 							conn.SendData(operationID, data)
 						},
+					}
+
+					logger.WithFields(log.Fields{
+						"conn":         conn.ID(),
+						"subscription": subscription.GetID(),
+					}).Info("Add subscription")
+
+					if errors := ValidateSubscription(subscription); len(errors) > 0 {
+						logger.WithField("errors", errors).Warn("Failed to add invalid subscription")
+						return errors
+					}
+
+					// Parse the subscription query
+					document, err := parser.Parse(parser.ParseParams{
+						Source: subscription.GetQuery(),
 					})
+					if err != nil {
+						logger.WithField("err", err).Warn("Failed to parse subscription query")
+						return []error{err}
+					}
+
+					// Validate the query document
+					validation := graphql.ValidateDocument(config.Schema, document, nil)
+					if !validation.IsValid {
+						logger.WithFields(log.Fields{
+							"errors": validation.Errors,
+						}).Warn("Failed to validate subscription query")
+						return ErrorsFromGraphQLErrors(validation.Errors)
+					}
+
+					// Remember the query document for later
+					subscription.SetDocument(document)
+
+					// Extract query names from the document (typically, there should only be one)
+					subscription.SetFields(SubscriptionFieldNamesFromDocument(document))
+
+					return config.SubscriptionManager.AddSubscription(conn, subscription)
 				},
 				StopOperation: func(conn Connection, operationID string) {
 					config.SubscriptionManager.RemoveSubscription(conn, operationID)

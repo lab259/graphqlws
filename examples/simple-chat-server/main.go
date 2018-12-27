@@ -196,6 +196,7 @@ func main() {
 	}, subscriptionManager, *log.New())
 
 	websocketHandler := graphqlws.NewHandler(graphqlws.HandlerConfig{
+		Schema:              &schema,
 		ConnectionFactory:   connFactory,
 		SubscriptionManager: subscriptionManager,
 	})

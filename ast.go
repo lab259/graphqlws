@@ -56,7 +56,7 @@ func namesForSelectionSets(sets []*ast.SelectionSet) []string {
 	return names
 }
 
-func subscriptionFieldNamesFromDocument(doc *ast.Document) []string {
+func SubscriptionFieldNamesFromDocument(doc *ast.Document) []string {
 	defs := operationDefinitionsWithOperation(doc, "subscription")
 	sets := selectionSetsForOperationDefinitions(defs)
 	return namesForSelectionSets(sets)

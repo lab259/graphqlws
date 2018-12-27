@@ -117,47 +117,47 @@ func triggerSubscription(payload map[string]interface{}, schema *graphql.Schema,
 	/*
 	TODO
 	 */
-	 /*
-	allSubscriptions := manager.Subscriptions()
+	/*
+   allSubscriptions := manager.Subscriptions()
 
-	sameQuerySubscriptionsMap := make(map[string][]*graphqlws.Subscription)
-	for connection := range allSubscriptions {
-		for _, subscription := range allSubscriptions[connection] {
-			for _, field := range subscription.Fields {
-				if field == subscriptionName {
-					sameQuerySubscriptionsMap[subscription.Query] = append(sameQuerySubscriptionsMap[subscription.Query], subscription)
-				}
-			}
-		}
-	}
+   sameQuerySubscriptionsMap := make(map[string][]*graphqlws.Subscription)
+   for connection := range allSubscriptions {
+	   for _, subscription := range allSubscriptions[connection] {
+		   for _, field := range subscription.Fields {
+			   if field == subscriptionName {
+				   sameQuerySubscriptionsMap[subscription.Query] = append(sameQuerySubscriptionsMap[subscription.Query], subscription)
+			   }
+		   }
+	   }
+   }
 
-	for _, sameQuerySubscriptions := range sameQuerySubscriptionsMap {
+   for _, sameQuerySubscriptions := range sameQuerySubscriptionsMap {
 
-		var subscriptionData *graphqlws.DataMessagePayload
-		for _, subscription := range sameQuerySubscriptions {
-			if subscriptionData == nil {
-				ctx := context.Background()
+	   var subscriptionData *graphqlws.DataMessagePayload
+	   for _, subscription := range sameQuerySubscriptions {
+		   if subscriptionData == nil {
+			   ctx := context.Background()
 
-				params := graphql.Params{
-					Schema:         *schema,
-					RequestString:  subscription.Query,
-					VariableValues: subscription.Variables,
-					OperationName:  subscription.OperationName,
-					Context:        ctx,
-					RootObject:     payload,
-				}
+			   params := graphql.Params{
+				   Schema:         *schema,
+				   RequestString:  subscription.Query,
+				   VariableValues: subscription.Variables,
+				   OperationName:  subscription.OperationName,
+				   Context:        ctx,
+				   RootObject:     payload,
+			   }
 
-				result := graphql.Do(params)
+			   result := graphql.Do(params)
 
-				subscriptionData = &graphqlws.DataMessagePayload{
-					Data:   result.Data,
-					Errors: graphqlws.ErrorsFromGraphQLErrors(result.Errors),
-				}
-			}
-			subscription.SendData(subscriptionData)
-		}
-	}
-	 */
+			   subscriptionData = &graphqlws.DataMessagePayload{
+				   Data:   result.Data,
+				   Errors: graphqlws.ErrorsFromGraphQLErrors(result.Errors),
+			   }
+		   }
+		   subscription.SendData(subscriptionData)
+	   }
+   }
+	*/
 	return nil
 }
 

@@ -7,7 +7,6 @@ import (
 	"github.com/lab259/graphql"
 	"github.com/lab259/graphql/gqlerrors"
 	"github.com/lab259/graphql/language/ast"
-	"github.com/lab259/graphql/language/parser"
 	log "github.com/sirupsen/logrus"
 	"strings"
 	"sync"
@@ -137,7 +136,7 @@ type SubscriptionManager interface {
 
 	CreateSubscriptionSubscriber(subscription SubscriptionInterface) Subscriber
 
-	Publish(topic Topic, ctx context.Context) error
+	Publish(topic Topic, data interface{}) error
 
 	Subscribe(Subscriber) error
 }
@@ -170,11 +169,12 @@ func newSubscriptionManager(schema *graphql.Schema, logger *log.Entry) Subscript
 	return manager
 }
 
-func (m *inMemorySubscriptionManager) Publish(topic Topic, ctx context.Context) error {
+func (m *inMemorySubscriptionManager) Publish(topic Topic, data interface{}) error {
 	subs, ok := m.topics[topic]
 	if !ok {
 		return nil
 	}
+	ctx := context.WithValue(context.Background(), PUBLISHED_DATA, data)
 	for _, sub := range subs {
 		log.WithFields(log.Fields{
 			"topic":          topic,
@@ -225,40 +225,6 @@ func (m *inMemorySubscriptionManager) AddSubscription(
 	conn Connection,
 	subscription SubscriptionInterface,
 ) []error {
-	m.logger.WithFields(log.Fields{
-		"conn":         conn.ID(),
-		"subscription": subscription.GetID(),
-	}).Info("Add subscription")
-
-	if errors := validateSubscription(subscription); len(errors) > 0 {
-		m.logger.WithField("errors", errors).Warn("Failed to add invalid subscription")
-		return errors
-	}
-
-	// Parse the subscription query
-	document, err := parser.Parse(parser.ParseParams{
-		Source: subscription.GetQuery(),
-	})
-	if err != nil {
-		m.logger.WithField("err", err).Warn("Failed to parse subscription query")
-		return []error{err}
-	}
-
-	// Validate the query document
-	validation := graphql.ValidateDocument(m.schema, document, nil)
-	if !validation.IsValid {
-		m.logger.WithFields(log.Fields{
-			"errors": validation.Errors,
-		}).Warn("Failed to validate subscription query")
-		return ErrorsFromGraphQLErrors(validation.Errors)
-	}
-
-	// Remember the query document for later
-	subscription.SetDocument(document)
-
-	// Extract query names from the document (typically, there should only be one)
-	subscription.SetFields(subscriptionFieldNamesFromDocument(document))
-
 	subscriber := NewInMemorySubscriber(subscription)
 
 	result := make([]error, 0)
@@ -289,13 +255,13 @@ func (m *inMemorySubscriptionManager) AddSubscription(
 		if !ok {
 			panic(fmt.Sprintf("subscription %s is not a SubscriptionField", fieldName))
 		}
-		err = subscriptionField.Subscribe(subscriber)
+		err := subscriptionField.Subscribe(subscriber)
 		if err != nil {
 			result = append(result, err)
 			continue
 		}
 	}
-	err = m.Subscribe(subscriber)
+	err := m.Subscribe(subscriber)
 	if err != nil {
 		result = append(result, err)
 	}
@@ -338,7 +304,7 @@ func (m *inMemorySubscriptionManager) CreateSubscriptionSubscriber(subscription 
 	return NewInMemorySubscriber(subscription)
 }
 
-func validateSubscription(s SubscriptionInterface) []error {
+func ValidateSubscription(s SubscriptionInterface) []error {
 	errs := []error{}
 
 	if s.GetID() == "" {
