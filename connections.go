@@ -26,7 +26,7 @@ const (
 	gqlStop                = "stop"
 
 	// Maximum size of incoming messages
-	readLimit = 4096
+	defaultReadLimit = 4096
 
 	// Timeout for outgoing messages
 	writeTimeout = 10 * time.Second
@@ -98,6 +98,7 @@ type ConnectionEventHandlers struct {
 type ConnectionConfig struct {
 	Authenticate  AuthenticateFunc
 	EventHandlers ConnectionEventHandlers
+	ReadLimit     int64
 }
 
 // Connection is an interface to represent GraphQL WebSocket connections.
@@ -155,6 +156,11 @@ func operationMessageForType(messageType string) OperationMessage {
 // the client-server communication.
 func NewConnection(ws *websocket.Conn, config ConnectionConfig) Connection {
 	conn := new(connection)
+
+	if config.ReadLimit == 0 {
+		config.ReadLimit = defaultReadLimit
+	}
+
 	conn.id = uuid.New().String()
 	conn.ws = ws
 	conn.config = config
@@ -188,6 +194,7 @@ func NewConnectionFactory(connConfig ConnectionConfig, sManager SubscriptionMana
 
 func (factory *connectionFactory) Create(ws *websocket.Conn, handlers ConnectionEventHandlers) Connection {
 	return NewConnection(ws, ConnectionConfig{
+		ReadLimit: factory.config.ReadLimit,
 		Authenticate: factory.config.Authenticate,
 		EventHandlers: ConnectionEventHandlers{
 			Close: func(conn Connection) {
@@ -338,7 +345,7 @@ func (conn *connection) readLoop() {
 	// Close the WebSocket connection when leaving the read loop
 	defer conn.ws.Close()
 
-	conn.ws.SetReadLimit(readLimit)
+	conn.ws.SetReadLimit(conn.config.ReadLimit)
 
 	for {
 		// Read the next message received from the client
