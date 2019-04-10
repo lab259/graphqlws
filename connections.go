@@ -108,7 +108,7 @@ type ConnectionControlMessageHandlers struct {
 	// Most applications should handle close messages as part of their normal error handling.
 	// Applications should only set a close handler when the application must perform some
 	// action before sending a close message back to the peer.
-	CloseHandler func(code int, text string) error
+	CloseHandler func(Connection, int, string) error
 
 	// PingHandler is the handler for ping messages received from the peer. The appData
 	// argument to h is the PING message application data. The default ping handler sends
@@ -117,7 +117,7 @@ type ConnectionControlMessageHandlers struct {
 	// The handler function is called from the NextReader, ReadMessage and message reader
 	// Read methods. The application must read the connection to process ping messages as
 	// described in the section on Control Messages above.
-	PingHandler func(appData string) error
+	PingHandler func(Connection, string) error
 
 	// PongHandler is the handler for pong messages received from the peer. The appData
 	// argument to h is the PONG message application data. The default pong handler
@@ -126,7 +126,7 @@ type ConnectionControlMessageHandlers struct {
 	// The handler function is called from the NextReader, ReadMessage and message reader
 	// Read methods. The application must read the connection to process pong messages as
 	// described in the section on Control Messages above.
-	PongHandler func(appData string) error
+	PongHandler func(Connection, string) error
 }
 
 // ConnectionConfig defines the configuration parameters of a
@@ -206,15 +206,21 @@ func NewConnection(ws *websocket.Conn, config ConnectionConfig) Connection {
 	conn.closeMutex = &sync.Mutex{}
 
 	if config.ControlMessageHandlers.CloseHandler != nil {
-		conn.Conn().SetCloseHandler(config.ControlMessageHandlers.CloseHandler)
+		conn.Conn().SetCloseHandler(func(code int, text string) error {
+			return config.ControlMessageHandlers.CloseHandler(conn, code, text)
+		})
 	}
 
 	if config.ControlMessageHandlers.PingHandler != nil {
-		conn.Conn().SetPingHandler(config.ControlMessageHandlers.PingHandler)
+		conn.Conn().SetPingHandler(func(appData string) error {
+			return config.ControlMessageHandlers.PingHandler(conn, appData)
+		})
 	}
 
 	if config.ControlMessageHandlers.PongHandler != nil {
-		conn.Conn().SetPongHandler(config.ControlMessageHandlers.PongHandler)
+		conn.Conn().SetPongHandler(func(appData string) error {
+			return config.ControlMessageHandlers.PongHandler(conn, appData)
+		})
 	}
 
 	conn.outgoing = make(chan OperationMessage)
