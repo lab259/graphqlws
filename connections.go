@@ -395,7 +395,11 @@ func (conn *connection) writeLoop() {
 	// Close the WebSocket connection when leaving the write loop;
 	// this ensures the read loop is also terminated and the connection
 	// closed cleanly
-	defer conn.ws.Close()
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		conn.ws.Close()
+	}()
 
 	for {
 		select {
@@ -422,6 +426,11 @@ func (conn *connection) writeLoop() {
 				}).Warn("Sending message failed")
 				return
 			}
+		case <-ticker.C:
+			conn.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := conn.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -431,6 +440,14 @@ func (conn *connection) readLoop() {
 	defer conn.ws.Close()
 
 	conn.ws.SetReadLimit(conn.config.ReadLimit)
+	conn.ws.SetReadDeadline(time.Now().Add(pongWait))
+	conn.ws.SetPongHandler(func(message string) error {
+		conn.ws.SetReadDeadline(time.Now().Add(pongWait))
+		if conn.config.ControlMessageHandlers.PongHandler != nil {
+			return conn.config.ControlMessageHandlers.PongHandler(conn, message)
+		}
+		return nil
+	})
 
 	for {
 		// Read the next message received from the client
