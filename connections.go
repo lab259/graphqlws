@@ -93,12 +93,49 @@ type ConnectionEventHandlers struct {
 	StopOperation func(Connection, string)
 }
 
+// ConnectionControlMessageHandlers define the control message handlers for a connection.
+// The WebSocket protocol defines three types of control messages: close, ping and pong.
+type ConnectionControlMessageHandlers struct {
+	// CloseHandler is the handler for close messages received from the peer.
+	// The code argument to h is the received close code or CloseNoStatusReceived
+	// if the close message is empty. The default close handler sends a close message back to the peer.
+	//
+	// The handler function is called from the NextReader, ReadMessage and message
+	// reader Read methods. The application must read the connection to process close
+	// messages as described in the section on Control Messages above.
+	//
+	// The connection read methods return a CloseError when a close message is received.
+	// Most applications should handle close messages as part of their normal error handling.
+	// Applications should only set a close handler when the application must perform some
+	// action before sending a close message back to the peer.
+	CloseHandler func(code int, text string) error
+
+	// PingHandler is the handler for ping messages received from the peer. The appData
+	// argument to h is the PING message application data. The default ping handler sends
+	// a pong to the peer.
+	//
+	// The handler function is called from the NextReader, ReadMessage and message reader
+	// Read methods. The application must read the connection to process ping messages as
+	// described in the section on Control Messages above.
+	PingHandler func(appData string)
+
+	// PongHandler is the handler for pong messages received from the peer. The appData
+	// argument to h is the PONG message application data. The default pong handler
+	// does nothing.
+	//
+	// The handler function is called from the NextReader, ReadMessage and message reader
+	// Read methods. The application must read the connection to process pong messages as
+	// described in the section on Control Messages above.
+	PongHandler func(appData string) error
+}
+
 // ConnectionConfig defines the configuration parameters of a
 // GraphQL WebSocket connection.
 type ConnectionConfig struct {
-	Authenticate  AuthenticateFunc
-	EventHandlers ConnectionEventHandlers
-	ReadLimit     int64
+	Authenticate           AuthenticateFunc
+	EventHandlers          ConnectionEventHandlers
+	ControlMessageHandlers ConnectionControlMessageHandlers
+	ReadLimit              int64
 }
 
 // Connection is an interface to represent GraphQL WebSocket connections.
@@ -168,6 +205,18 @@ func NewConnection(ws *websocket.Conn, config ConnectionConfig) Connection {
 	conn.closed = false
 	conn.closeMutex = &sync.Mutex{}
 
+	if config.ControlMessageHandlers.CloseHandler != nil {
+		conn.Conn().SetCloseHandler(config.ControlMessageHandlers.CloseHandler)
+	}
+
+	if config.ControlMessageHandlers.PingHandler != nil {
+		conn.Conn().SetPingHandler(config.ControlMessageHandlers.PingHandler)
+	}
+
+	if config.ControlMessageHandlers.PongHandler != nil {
+		conn.Conn().SetPongHandler(config.ControlMessageHandlers.PongHandler)
+	}
+
 	conn.outgoing = make(chan OperationMessage)
 
 	go conn.writeLoop()
@@ -194,7 +243,7 @@ func NewConnectionFactory(connConfig ConnectionConfig, sManager SubscriptionMana
 
 func (factory *connectionFactory) Create(ws *websocket.Conn, handlers ConnectionEventHandlers) Connection {
 	return NewConnection(ws, ConnectionConfig{
-		ReadLimit: factory.config.ReadLimit,
+		ReadLimit:    factory.config.ReadLimit,
 		Authenticate: factory.config.Authenticate,
 		EventHandlers: ConnectionEventHandlers{
 			Close: func(conn Connection) {
@@ -241,6 +290,7 @@ func (factory *connectionFactory) Create(ws *websocket.Conn, handlers Connection
 				}
 			},
 		},
+		ControlMessageHandlers: factory.config.ControlMessageHandlers,
 	})
 }
 
