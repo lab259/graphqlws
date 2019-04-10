@@ -117,7 +117,7 @@ type ConnectionControlMessageHandlers struct {
 	// The handler function is called from the NextReader, ReadMessage and message reader
 	// Read methods. The application must read the connection to process ping messages as
 	// described in the section on Control Messages above.
-	PingHandler func(appData string)
+	PingHandler func(appData string) error
 
 	// PongHandler is the handler for pong messages received from the peer. The appData
 	// argument to h is the PONG message application data. The default pong handler
