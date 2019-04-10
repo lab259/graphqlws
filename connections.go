@@ -30,6 +30,12 @@ const (
 
 	// Timeout for outgoing messages
 	writeTimeout = 10 * time.Second
+
+	// Timeout for reding the next pong message from the peer
+	pongWait = 60 * time.Second
+
+	// Interval for sending pings to peer. Must be less than pongWait
+	pingPeriod = (pongWait * 9) / 10
 )
 
 // InitMessagePayload defines the parameters of a connection
@@ -75,6 +81,9 @@ type AuthenticateFunc func(token string) (interface{}, error)
 // Event handlers allow other system components to react to events such
 // as the connection closing or an operation being started or stopped.
 type ConnectionEventHandlers struct {
+	// Init is called whenever the connection is initilized.
+	Init func(Connection)
+
 	// Close is called whenever the connection is closed, regardless of
 	// whether this happens because of an error or a deliberate termination
 	// by the client.
@@ -252,6 +261,20 @@ func (factory *connectionFactory) Create(ws *websocket.Conn, handlers Connection
 		ReadLimit:    factory.config.ReadLimit,
 		Authenticate: factory.config.Authenticate,
 		EventHandlers: ConnectionEventHandlers{
+			Init: func(conn Connection) {
+				factory.logger.WithFields(log.Fields{
+					"conn": conn.ID(),
+					"user": conn.User(),
+				}).Debug("Initing connection")
+
+				if handlers.Init != nil {
+					handlers.Init(conn)
+				}
+
+				if factory.config.EventHandlers.Init != nil {
+					factory.config.EventHandlers.Init(conn)
+				}
+			},
 			Close: func(conn Connection) {
 				factory.logger.WithFields(log.Fields{
 					"conn": conn.ID(),
@@ -288,6 +311,12 @@ func (factory *connectionFactory) Create(ws *websocket.Conn, handlers Connection
 				return errs
 			},
 			StopOperation: func(conn Connection, opID string) {
+				factory.logger.WithFields(log.Fields{
+					"conn": conn.ID(),
+					"op":   opID,
+					"user": conn.User(),
+				}).Debug("Stop operation")
+
 				if handlers.StopOperation != nil {
 					handlers.StopOperation(conn, opID)
 				}
@@ -444,9 +473,15 @@ func (conn *connection) readLoop() {
 					} else {
 						conn.user = user
 						conn.outgoing <- operationMessageForType(gqlConnectionAck)
+						if conn.config.EventHandlers.Init != nil {
+							conn.config.EventHandlers.Init(conn)
+						}
 					}
 				} else {
 					conn.outgoing <- operationMessageForType(gqlConnectionAck)
+					if conn.config.EventHandlers.Init != nil {
+						conn.config.EventHandlers.Init(conn)
+					}
 				}
 			}
 
