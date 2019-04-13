@@ -30,6 +30,12 @@ const (
 
 	// Timeout for outgoing messages
 	writeTimeout = 10 * time.Second
+
+	// Timeout for reding the next pong message from the peer
+	pongWait = 60 * time.Second
+
+	// Interval for sending pings to peer. Must be less than pongWait
+	pingPeriod = (pongWait * 9) / 10
 )
 
 // InitMessagePayload defines the parameters of a connection
@@ -75,6 +81,9 @@ type AuthenticateFunc func(token string) (interface{}, error)
 // Event handlers allow other system components to react to events such
 // as the connection closing or an operation being started or stopped.
 type ConnectionEventHandlers struct {
+	// Init is called whenever the connection is initilized.
+	Init func(Connection)
+
 	// Close is called whenever the connection is closed, regardless of
 	// whether this happens because of an error or a deliberate termination
 	// by the client.
@@ -93,12 +102,49 @@ type ConnectionEventHandlers struct {
 	StopOperation func(Connection, string)
 }
 
+// ConnectionControlMessageHandlers define the control message handlers for a connection.
+// The WebSocket protocol defines three types of control messages: close, ping and pong.
+type ConnectionControlMessageHandlers struct {
+	// CloseHandler is the handler for close messages received from the peer.
+	// The code argument to h is the received close code or CloseNoStatusReceived
+	// if the close message is empty. The default close handler sends a close message back to the peer.
+	//
+	// The handler function is called from the NextReader, ReadMessage and message
+	// reader Read methods. The application must read the connection to process close
+	// messages as described in the section on Control Messages above.
+	//
+	// The connection read methods return a CloseError when a close message is received.
+	// Most applications should handle close messages as part of their normal error handling.
+	// Applications should only set a close handler when the application must perform some
+	// action before sending a close message back to the peer.
+	CloseHandler func(Connection, int, string) error
+
+	// PingHandler is the handler for ping messages received from the peer. The appData
+	// argument to h is the PING message application data. The default ping handler sends
+	// a pong to the peer.
+	//
+	// The handler function is called from the NextReader, ReadMessage and message reader
+	// Read methods. The application must read the connection to process ping messages as
+	// described in the section on Control Messages above.
+	PingHandler func(Connection, string) error
+
+	// PongHandler is the handler for pong messages received from the peer. The appData
+	// argument to h is the PONG message application data. The default pong handler
+	// does nothing.
+	//
+	// The handler function is called from the NextReader, ReadMessage and message reader
+	// Read methods. The application must read the connection to process pong messages as
+	// described in the section on Control Messages above.
+	PongHandler func(Connection, string) error
+}
+
 // ConnectionConfig defines the configuration parameters of a
 // GraphQL WebSocket connection.
 type ConnectionConfig struct {
-	Authenticate  AuthenticateFunc
-	EventHandlers ConnectionEventHandlers
-	ReadLimit     int64
+	Authenticate           AuthenticateFunc
+	EventHandlers          ConnectionEventHandlers
+	ControlMessageHandlers ConnectionControlMessageHandlers
+	ReadLimit              int64
 }
 
 // Connection is an interface to represent GraphQL WebSocket connections.
@@ -168,6 +214,24 @@ func NewConnection(ws *websocket.Conn, config ConnectionConfig) Connection {
 	conn.closed = false
 	conn.closeMutex = &sync.Mutex{}
 
+	if config.ControlMessageHandlers.CloseHandler != nil {
+		conn.Conn().SetCloseHandler(func(code int, text string) error {
+			return config.ControlMessageHandlers.CloseHandler(conn, code, text)
+		})
+	}
+
+	if config.ControlMessageHandlers.PingHandler != nil {
+		conn.Conn().SetPingHandler(func(appData string) error {
+			return config.ControlMessageHandlers.PingHandler(conn, appData)
+		})
+	}
+
+	if config.ControlMessageHandlers.PongHandler != nil {
+		conn.Conn().SetPongHandler(func(appData string) error {
+			return config.ControlMessageHandlers.PongHandler(conn, appData)
+		})
+	}
+
 	conn.outgoing = make(chan OperationMessage)
 
 	go conn.writeLoop()
@@ -194,9 +258,23 @@ func NewConnectionFactory(connConfig ConnectionConfig, sManager SubscriptionMana
 
 func (factory *connectionFactory) Create(ws *websocket.Conn, handlers ConnectionEventHandlers) Connection {
 	return NewConnection(ws, ConnectionConfig{
-		ReadLimit: factory.config.ReadLimit,
+		ReadLimit:    factory.config.ReadLimit,
 		Authenticate: factory.config.Authenticate,
 		EventHandlers: ConnectionEventHandlers{
+			Init: func(conn Connection) {
+				factory.logger.WithFields(log.Fields{
+					"conn": conn.ID(),
+					"user": conn.User(),
+				}).Debug("Initing connection")
+
+				if handlers.Init != nil {
+					handlers.Init(conn)
+				}
+
+				if factory.config.EventHandlers.Init != nil {
+					factory.config.EventHandlers.Init(conn)
+				}
+			},
 			Close: func(conn Connection) {
 				factory.logger.WithFields(log.Fields{
 					"conn": conn.ID(),
@@ -233,6 +311,12 @@ func (factory *connectionFactory) Create(ws *websocket.Conn, handlers Connection
 				return errs
 			},
 			StopOperation: func(conn Connection, opID string) {
+				factory.logger.WithFields(log.Fields{
+					"conn": conn.ID(),
+					"op":   opID,
+					"user": conn.User(),
+				}).Debug("Stop operation")
+
 				if handlers.StopOperation != nil {
 					handlers.StopOperation(conn, opID)
 				}
@@ -241,6 +325,7 @@ func (factory *connectionFactory) Create(ws *websocket.Conn, handlers Connection
 				}
 			},
 		},
+		ControlMessageHandlers: factory.config.ControlMessageHandlers,
 	})
 }
 
@@ -310,7 +395,11 @@ func (conn *connection) writeLoop() {
 	// Close the WebSocket connection when leaving the write loop;
 	// this ensures the read loop is also terminated and the connection
 	// closed cleanly
-	defer conn.ws.Close()
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		conn.ws.Close()
+	}()
 
 	for {
 		select {
@@ -337,6 +426,11 @@ func (conn *connection) writeLoop() {
 				}).Warn("Sending message failed")
 				return
 			}
+		case <-ticker.C:
+			conn.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if err := conn.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -346,6 +440,14 @@ func (conn *connection) readLoop() {
 	defer conn.ws.Close()
 
 	conn.ws.SetReadLimit(conn.config.ReadLimit)
+	conn.ws.SetReadDeadline(time.Now().Add(pongWait))
+	conn.ws.SetPongHandler(func(message string) error {
+		conn.ws.SetReadDeadline(time.Now().Add(pongWait))
+		if conn.config.ControlMessageHandlers.PongHandler != nil {
+			return conn.config.ControlMessageHandlers.PongHandler(conn, message)
+		}
+		return nil
+	})
 
 	for {
 		// Read the next message received from the client
@@ -388,9 +490,15 @@ func (conn *connection) readLoop() {
 					} else {
 						conn.user = user
 						conn.outgoing <- operationMessageForType(gqlConnectionAck)
+						if conn.config.EventHandlers.Init != nil {
+							conn.config.EventHandlers.Init(conn)
+						}
 					}
 				} else {
 					conn.outgoing <- operationMessageForType(gqlConnectionAck)
+					if conn.config.EventHandlers.Init != nil {
+						conn.config.EventHandlers.Init(conn)
+					}
 				}
 			}
 
